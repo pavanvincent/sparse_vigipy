@@ -7,9 +7,9 @@ from scipy.sparse import issparse, csr_matrix
 from scipy.special import digamma, gdtr, gammaln, betainc
 from scipy.optimize import minimize
 
-from ..sparse-utils.sparse_Container import Container
-from ..sparse-utils.sparse_expectations import calculate_expected
-from ..sparse-utils.sparse-distribution_funcs.sparse_quantile_funcs import quantiles
+from ..sparse_utils.sparse_Container import Container
+from ..sparse_utils.sparse_expectations import calculate_expected
+from ..sparse_utils.sparse-distribution_funcs.sparse_quantile_funcs import quantiles
 
 EPS = np.finfo(np.float32).eps
 BOUNDED_METHODS = {
