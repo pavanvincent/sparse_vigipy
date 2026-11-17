@@ -5,7 +5,7 @@ from numba import njit, prange
 from scipy.sparse import issparse, csr_matrix
 from scipy.stats import norm
 from scipy.special import digamma, polygamma
-from ..sparse-utils.sparse_Container import Container
+from ..sparse_utils.sparse_Container import Container
 
 
 # The trigamma function is mathematically the first derivative of digamma (first-order polygamma).
