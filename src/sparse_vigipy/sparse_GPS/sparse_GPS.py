@@ -3,6 +3,7 @@ from __future__ import annotations
 import warnings
 import numpy as np
 import pandas as pd
+from scipy import sparse
 from scipy.sparse import issparse, csr_matrix
 from scipy.special import digamma, gdtr, gammaln, betainc
 from scipy.optimize import minimize
