@@ -44,18 +44,17 @@ def _get_labels(
 def _build_contingency_from_container(container):
     if container.type == "contingency":
         mat = container.contingency
-        # Patch : Extraction dynamique des noms depuis les données brutes si l'attribut direct n'est pas présent
+        # Récupération sécurisée des noms uniques à partir des données réelles
         products = np.array(container.product_names) if hasattr(container, 'product_names') else container.data['product_name'].unique()
         aes = np.array(container.ae_names) if hasattr(container, 'ae_names') else container.data['ae_name'].unique()
         N = float(container.N)
     elif container.type == "individual":
-        # Get inputs
+        # Cette partie n'est appelée que pour les conteneurs de type 'individual'
         sf = container.get_sparse_features()
         so = container.get_sparse_outcomes()
         products = np.array(container.product_names)
         aes = np.array(container.ae_names)
         N = container.N
-        # Matrix multiplication
         mat = sf.T.dot(so)
     else:
         raise ValueError("Container type must be 'individual' or 'contingency'.")
