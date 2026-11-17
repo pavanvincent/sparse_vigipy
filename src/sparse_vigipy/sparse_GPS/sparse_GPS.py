@@ -45,31 +45,53 @@ def _build_contingency_from_container(
     container: Container,
 ) -> tuple[sparse.coo_matrix, np.ndarray, np.ndarray, float]:
     """Compute the sparse product-event contingency matrix using Container sparse getters."""
-    X = container.get_sparse_features()  # shape: (n_reports, n_products)
-    Y = container.get_sparse_outcomes()  # shape: (n_reports, n_aes)
+    if container.type == "contingency":
+        mat = container.contingency
+        products = np.array(container.product_names)
+        aes = np.array(container.ae_names)
+        N = float(container.N)
+        return mat, products, aes, N
+    else:
+        X = container.get_sparse_features()  # shape: (n_reports, n_products)
+        Y = container.get_sparse_outcomes()  # shape: (n_reports, n_aes)
+        mat = X.T.tocsr() @ Y.tocsr()
+        products = np.array(container.product_names)
+        aes = np.array(container.ae_names)
+        N = float(X.shape[0])
+        return mat.tocoo(), products, aes, N
 
-    # Sparse matrix multiplication yields the (n_products, n_aes) N_11 count matrix
-    mat = (X.T @ Y).astype(np.float64).tocoo()
-    mat.eliminate_zeros()
 
-    N = float(container.N) if hasattr(container, "N") and container.N is not None else float(mat.sum())
 
-    products = _get_labels(
-        container,
-        ("product_names", "products", "feature_names"),
-        getattr(container, "product_features", None),
-        mat.shape[0],
-        "Product",
-    )
-    aes = _get_labels(
-        container,
-        ("ae_names", "aes", "outcome_names"),
-        getattr(container, "event_outcomes", None),
-        mat.shape[1],
-        "AE",
-    )
 
-    return mat, products, aes, N
+# def _build_contingency_from_container(
+#   container: Container,
+# ) -> tuple[sparse.coo_matrix, np.ndarray, np.ndarray, float]:
+#    """Compute the sparse product-event contingency matrix using Container sparse getters."""
+#    X = container.get_sparse_features()  # shape: (n_reports, n_products)
+#    Y = container.get_sparse_outcomes()  # shape: (n_reports, n_aes)
+
+#    # Sparse matrix multiplication yields the (n_products, n_aes) N_11 count matrix
+#    mat = (X.T @ Y).astype(np.float64).tocoo()
+#    mat.eliminate_zeros()
+
+#   N = float(container.N) if hasattr(container, "N") and container.N is not None else float(mat.sum())
+
+#   products = _get_labels(
+#        container,
+#        ("product_names", "products", "feature_names"),
+#        getattr(container, "product_features", None),
+#        mat.shape[0],
+#        "Product",
+#    )
+#    aes = _get_labels(
+#        container,
+#        ("ae_names", "aes", "outcome_names"),
+#        getattr(container, "event_outcomes", None),
+#        mat.shape[1],
+#        "AE",
+#    )
+
+#    return mat, products, aes, N
 
 
 def _optimize_gps_priors(
