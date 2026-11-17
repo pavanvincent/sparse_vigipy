@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from scipy.sparse import csr_matrix
-from .Container import Container
+from .sparse_Container import Container
 
 
 def _build_sparse_indicator(df, col_or_cols, weights=None, dtype=np.int8):
