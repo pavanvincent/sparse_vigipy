@@ -190,7 +190,7 @@ def gps(
     truncate: bool = False,
     maxiter: int = 500,
     criterion: str = "EB05>=2",
-) -> Container:
+) 
     """Compute signal detection based on Multi-item Gamma Poisson Shrinkage (GPS) using sparse matrices.
 
     Clinical Intuition:
