@@ -9,7 +9,7 @@ from scipy.optimize import minimize
 
 from ..sparse-utils.sparse_Container import Container
 from ..sparse-utils.sparse_expectations import calculate_expected
-from ..sparse-utils.sparse-distribution_funcs.sparse_quantiles import quantiles
+from ..sparse-utils.sparse-distribution_funcs.sparse_quantile_funcs import quantiles
 
 EPS = np.finfo(np.float32).eps
 BOUNDED_METHODS = {
