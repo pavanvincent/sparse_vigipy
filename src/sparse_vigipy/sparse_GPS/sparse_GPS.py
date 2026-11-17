@@ -41,24 +41,25 @@ def _get_labels(
     return np.asarray([f"{prefix}_{i}" for i in range(size)])
 
 
-def _build_contingency_from_container(
-    container: Container,
-) -> tuple[sparse.coo_matrix, np.ndarray, np.ndarray, float]:
-    """Compute the sparse product-event contingency matrix using Container sparse getters."""
+def _build_contingency_from_container(container):
     if container.type == "contingency":
         mat = container.contingency
-        products = np.array(container.product_names)
-        aes = np.array(container.ae_names)
+        # Patch : Extraction dynamique des noms depuis les données brutes si l'attribut direct n'est pas présent
+        products = np.array(container.product_names) if hasattr(container, 'product_names') else container.data['product_name'].unique()
+        aes = np.array(container.ae_names) if hasattr(container, 'ae_names') else container.data['ae_name'].unique()
         N = float(container.N)
-        return mat, products, aes, N
-    else:
-        X = container.get_sparse_features()  # shape: (n_reports, n_products)
-        Y = container.get_sparse_outcomes()  # shape: (n_reports, n_aes)
-        mat = X.T.tocsr() @ Y.tocsr()
+    elif container.type == "individual":
+        # Get inputs
+        sf = container.get_sparse_features()
+        so = container.get_sparse_outcomes()
         products = np.array(container.product_names)
         aes = np.array(container.ae_names)
-        N = float(X.shape[0])
-        return mat.tocoo(), products, aes, N
+        N = container.N
+        # Matrix multiplication
+        mat = sf.T.dot(so)
+    else:
+        raise ValueError("Container type must be 'individual' or 'contingency'.")
+    return mat, products, aes, N
 
 
 
