@@ -1,1 +1,1 @@
-from .sparse-PRR import prr
+from .sparse_PRR import prr
