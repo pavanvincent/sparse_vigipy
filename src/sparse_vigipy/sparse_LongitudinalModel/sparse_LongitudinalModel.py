@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from ..sparse-utils.sparse_data_prep import convert, convert_binary, convert_multi_item
+from ..sparse_utils.sparse_data_prep import convert, convert_binary, convert_multi_item
 
 
 class LongitudinalModel:
