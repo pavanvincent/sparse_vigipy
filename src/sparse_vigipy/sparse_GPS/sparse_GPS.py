@@ -259,6 +259,11 @@ def gps(
 
     # 1. Build sparse contingency matrix via Container.get_sparse_features() & get_sparse_outcomes()
     mat, products, aes, N = _build_contingency_from_container(container)
+
+    # 2. immediate conversion at format coo if necessary
+    if not isinstance(mat, sparse.coo_matrix):
+        mat = mat.tocoo()
+    
     row_totals = np.asarray(mat.sum(axis=1)).ravel()
     col_totals = np.asarray(mat.sum(axis=0)).ravel()
 
