@@ -183,7 +183,7 @@ def truncated_likelihood(
 def gps(
     container: Container,
     min_events: int = 4,
-    truncate: bool = True,
+    truncate: bool = False,
     maxiter: int = 500,
     criterion: str = "EB05>=2",
 ) -> Container:
@@ -401,7 +401,7 @@ def gps_sampled(
     max_points: int = 150_000,
     seed: int = 0,
     min_events: int = 4,
-    truncate: bool = True,
+    truncate: bool = False,
     truncate_thres: float = 1.0,
     maxiter: int = 500,
     criterion: str = "EB05>=2",
