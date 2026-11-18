@@ -53,9 +53,9 @@ def _build_contingency_from_container(
     mat = (X.T @ Y).astype(np.float64).tocoo()
     mat.eliminate_zeros()
 
-   N = float(container.N) if hasattr(container, "N") and container.N is not None else float(mat.sum())
+    N = float(container.N) if hasattr(container, "N") and container.N is not None else float(mat.sum())
 
-   products = _get_labels(
+    products = _get_labels(
         container,
         ("product_names", "products", "feature_names"),
         getattr(container, "product_features", None),
@@ -69,7 +69,7 @@ def _build_contingency_from_container(
         mat.shape[1],
         "AE",
     )
-
+     
     return mat, products, aes, N
 
 
