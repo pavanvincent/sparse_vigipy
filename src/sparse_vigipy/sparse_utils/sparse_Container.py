@@ -1,11 +1,101 @@
+import numpy as np
 import pandas as pd
+from scipy import sparse
 from scipy.sparse import issparse, csr_matrix
+
+
+def _extract_active_substances(value):
+    """Extraction et normalisation des substances actives (aligné sur fast_profiles.py)."""
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    low = text.casefold()
+    if low == "not reported" or low.startswith("not available") or low.startswith("[truncated"):
+        return []
+    left = text.find("[")
+    right = text.find("]", left + 1)
+    if left != -1 and right != -1 and right > left + 1:
+        substances = [x.strip() for x in text[left + 1:right].split(",") if x.strip()]
+    else:
+        base = text.split(" (", 1)[0].strip()
+        substances = [x.strip() for x in base.split(",") if x.strip()] if base else []
+
+    invalid = {"", "N/A", "NOT AVAILABLE", "NOT REPORTED", "UNKNOWN"}
+    return [
+        " ".join(name.upper().split())
+        for name in substances
+        if " ".join(name.upper().split()) not in invalid
+    ]
 
 
 class Container:
     def __init__(self, params=False):
         if params:
             self.param = dict()
+
+    @classmethod
+    def from_raw_tables(
+        cls,
+        icsr_df: pd.DataFrame,
+        suspects_df: pd.DataFrame,
+        reactions_df: pd.DataFrame,
+    ) -> "Container":
+        """Construit un Container 'individual' creux aligné sur fast_profiles.py."""
+        # 1. Population unique (N)
+        pop_ids = pd.Index(icsr_df["safety_report_id"].dropna().unique())
+        N = len(pop_ids)
+
+        # 2. Produits (substances actives dédoublonnées par signalement)
+        pop_set = set(pop_ids)
+        sub_rows = []
+        for row in suspects_df[["safety_report_id", "drug"]].itertuples(index=False):
+            if row.safety_report_id in pop_set:
+                for sub in _extract_active_substances(row.drug):
+                    sub_rows.append((row.safety_report_id, sub))
+
+        if sub_rows:
+            sub_df = pd.DataFrame(sub_rows, columns=["id", "substance"]).drop_duplicates(["id", "substance"])
+            s_rows = pop_ids.get_indexer(sub_df["id"])
+            s_codes, product_names = pd.factorize(sub_df["substance"], sort=True)
+            sf = sparse.csr_matrix(
+                (np.ones(len(s_rows), dtype=np.float32), (s_rows, s_codes)),
+                shape=(N, len(product_names)),
+            )
+        else:
+            product_names = pd.Index([])
+            sf = sparse.csr_matrix((N, 0), dtype=np.float32)
+
+        # 3. Réactions (dédoublonnées par signalement)
+        pts = reactions_df["reaction_pt"].astype("string").str.strip()
+        valid_rx = pts.notna() & (pts != "") & reactions_df["safety_report_id"].isin(pop_set)
+
+        rx_df = pd.DataFrame({
+            "id": reactions_df.loc[valid_rx, "safety_report_id"].to_numpy(),
+            "pt": pts.loc[valid_rx].to_numpy(),
+        }).drop_duplicates(["id", "pt"])
+
+        if not rx_df.empty:
+            r_rows = pop_ids.get_indexer(rx_df["id"])
+            r_codes, ae_names = pd.factorize(rx_df["pt"], sort=True)
+            so = sparse.csr_matrix(
+                (np.ones(len(r_rows), dtype=np.float32), (r_rows, r_codes)),
+                shape=(N, len(ae_names)),
+            )
+        else:
+            ae_names = pd.Index([])
+            so = sparse.csr_matrix((N, 0), dtype=np.float32)
+
+        # 4. Assemblage du Container attendu par gps.py
+        container = cls(params=False)
+        container.type = "individual"
+        container.product_features = sf
+        container.event_outcomes = so
+        container.product_names = product_names.to_numpy()
+        container.ae_names = ae_names.to_numpy()
+        container.N = N
+        return container
 
     def get_sparse_features(self):
         """Return product_features as a SciPy CSR sparse matrix."""
