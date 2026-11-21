@@ -4,7 +4,6 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from scipy.sparse import issparse, csr_matrix
 from scipy.special import digamma, gdtr, gammaln, betainc
 from scipy.optimize import minimize
 
@@ -12,7 +11,9 @@ from ..sparse_utils.sparse_Container import Container
 from ..sparse_utils.sparse_expectations import calculate_expected
 from ..sparse_utils.sparse_distribution_funcs.sparse_quantile_funcs import quantiles
 
-EPS = np.finfo(np.float32).eps
+EPS = float(np.finfo(np.float32).eps)
+GPS_INIT = np.array([0.2041, 0.05816, 1.415, 1.838, 0.0969], dtype=np.float64)
+GPS_BOUNDS = ((EPS, 20), (EPS, 10), (EPS, 20), (EPS, 10), (0, 1))
 BOUNDED_METHODS = {
     "Nelder-Mead",
     "L-BFGS-B",
@@ -28,8 +29,29 @@ BOUNDED_METHODS = {
 def _extract_sparse_data(
     container: Container,
 ) -> tuple[sparse.coo_matrix, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
-    """Extract sparse contingency matrix (COO), exact marginal totals, labels, and N."""
-    if container.type == "contingency":
+    """Extract sparse contingency matrix (COO), report-level marginal totals, labels, and N."""
+    has_individual = hasattr(container, "product_features") and hasattr(container, "event_outcomes")
+
+    if has_individual:
+        sf = container.get_sparse_features()
+        so = container.get_sparse_outcomes()
+        products = np.asarray(container.product_names)
+        aes = np.asarray(container.ae_names)
+        N = float(container.N) if hasattr(container, "N") and container.N is not None else float(sf.shape[0])
+
+        # Exact report-level marginal counts (matching signal_methods.py & fast_profiles.py)
+        row_totals = np.asarray(sf.sum(axis=0), dtype=np.float64).ravel()
+        col_totals = np.asarray(so.sum(axis=0), dtype=np.float64).ravel()
+
+        if hasattr(container, "contingency") and sparse.issparse(container.contingency):
+            mat = container.contingency.tocoo()
+        else:
+            mat = sf.astype(np.float64).T.dot(so.astype(np.float64)).tocoo()
+        mat.eliminate_zeros()
+
+    elif getattr(container, "type", None) == "contingency" or (
+        hasattr(container, "contingency") and sparse.issparse(container.contingency)
+    ):
         mat = container.contingency
         if not isinstance(mat, sparse.coo_matrix):
             mat = mat.tocoo()
@@ -37,95 +59,25 @@ def _extract_sparse_data(
 
         if hasattr(container, "product_names") and container.product_names is not None:
             products = np.asarray(container.product_names)
+        elif hasattr(container, "product_index") and container.product_index is not None:
+            products = np.asarray(container.product_index)
         else:
             products = np.asarray(pd.Categorical(container.data["product_name"]).categories)
 
         if hasattr(container, "ae_names") and container.ae_names is not None:
             aes = np.asarray(container.ae_names)
+        elif hasattr(container, "ae_index") and container.ae_index is not None:
+            aes = np.asarray(container.ae_index)
         else:
             aes = np.asarray(pd.Categorical(container.data["ae_name"]).categories)
 
         N = float(container.N)
-        row_totals = np.asarray(mat.sum(axis=1)).ravel()
-        col_totals = np.asarray(mat.sum(axis=0)).ravel()
-
-    elif container.type == "individual":
-        sf = container.get_sparse_features()
-        so = container.get_sparse_outcomes()
-        products = np.asarray(container.product_names)
-        aes = np.asarray(container.ae_names)
-        N = float(container.N) if hasattr(container, "N") and container.N is not None else float(sf.shape[0])
-
-        # Exact report-level marginal counts (avoids multi-drug/multi-event inflation)
-        row_totals = np.asarray(sf.sum(axis=0)).ravel()
-        col_totals = np.asarray(so.sum(axis=0)).ravel()
-
-        mat = sf.T.dot(so).astype(np.float64).tocoo()
-        mat.eliminate_zeros()
+        row_totals = np.asarray(mat.sum(axis=1), dtype=np.float64).ravel()
+        col_totals = np.asarray(mat.sum(axis=0), dtype=np.float64).ravel()
     else:
-        raise ValueError("Container type must be 'individual' or 'contingency'.")
+        raise ValueError("Container must provide 'product_features'/'event_outcomes' or 'contingency'.")
 
     return mat, row_totals, col_totals, products, aes, N
-
-
-def _optimize_gps_priors(
-    container: Container,
-    priors: np.ndarray,
-    truncate: bool,
-    truncate_thres: float,
-    n11: np.ndarray,
-    expected: np.ndarray,
-    N: float,
-    minimization_method: str,
-    minimization_bounds: tuple[tuple[float, float], ...] | None,
-    minimization_options: dict | None,
-) -> tuple[np.ndarray, str]:
-    """Estimate empirical Bayes hyperprior parameters via maximum likelihood on sparse vectors."""
-    if minimization_method not in BOUNDED_METHODS:
-        minimization_bounds = None
-    elif minimization_bounds is None:
-        minimization_bounds = ((EPS, 20), (EPS, 10), (EPS, 20), (EPS, 10), (0, 1))
-
-    opts = {"maxiter": 500}
-    if minimization_options:
-        opts.update(minimization_options)
-
-    if not truncate:
-        gammaln_n11_1 = gammaln(n11 + 1.0)
-        p_out = minimize(
-            non_truncated_likelihood,
-            x0=priors,
-            args=(n11, expected, gammaln_n11_1),
-            options=opts,
-            method=minimization_method,
-            bounds=minimization_bounds,
-        )
-    else:
-        trunc = truncate_thres - 1.0
-        mask_trunc = n11 >= truncate_thres
-        n11_trunc = n11[mask_trunc]
-        E_trunc = expected[mask_trunc]
-        gammaln_n11_1 = gammaln(n11_trunc + 1.0)
-        p_out = minimize(
-            truncated_likelihood,
-            x0=priors,
-            args=(
-                n11_trunc,
-                E_trunc,
-                trunc,
-                gammaln_n11_1,
-            ),
-            options=opts,
-            method=minimization_method,
-            bounds=minimization_bounds,
-        )
-
-    priors_opt = p_out.x
-    if np.any(priors_opt < 0) or priors_opt[4] > 1:
-        warnings.warn(
-            f"Calculated priors violate distribution constraints. Alpha and Beta parameters should be >0 and mixture weight should be >=0 and <=1. Current priors: {priors_opt}. Numerical instability likely during processing. Considering using a minimization method that supports bounds."
-        )
-    return priors_opt, str(p_out.message)
 
 
 def non_truncated_likelihood(
@@ -180,176 +132,122 @@ def truncated_likelihood(
     return float(np.sum(-np.log(np.maximum(term1, 1e-300)) + np.log(np.maximum(term2, 1e-7))))
 
 
-def gps(
-    container: Container,
-    min_events: int = 4,
-    truncate: bool = False,
-    maxiter: int = 500,
-    criterion: str = "EB05>=2",
-) -> Container:
-    """Compute signal detection based on Multi-item Gamma Poisson Shrinkage (GPS) using sparse matrices."""
-    relative_risk = 1.0
-    decision_metric = "rank"
-    decision_thres = 0.05
-    ranking_statistic = "log2"
-    truncate_thres = 1.0
-    prior_init = None
-    prior_param = None
-    expected_method = "mantel-haentzel"
-    method_alpha = 1.0
-    minimization_method = "SLSQP"
-    minimization_bounds = ((EPS, 20), (EPS, 10), (EPS, 20), (EPS, 10), (0, 1))
-    minimization_options = {"maxiter": maxiter}
+def _optimize_gps_priors(
+    priors: np.ndarray,
+    truncate: bool,
+    truncate_thres: float,
+    n11: np.ndarray,
+    expected: np.ndarray,
+    minimization_method: str,
+    minimization_bounds: tuple[tuple[float, float], ...] | None,
+    minimization_options: dict | None,
+) -> tuple[np.ndarray, str]:
+    """Estimate empirical Bayes hyperprior parameters via maximum likelihood on sparse vectors."""
+    if minimization_method not in BOUNDED_METHODS:
+        minimization_bounds = None
+    elif minimization_bounds is None:
+        minimization_bounds = GPS_BOUNDS
 
-    if prior_init is None:
-        prior_init = {
-            "alpha1": 0.2041,
-            "beta1": 0.05816,
-            "alpha2": 1.415,
-            "beta2": 1.838,
-            "w": 0.0969,
-        }
-    elif isinstance(prior_init, (list, tuple, np.ndarray)):
-        prior_init = {
-            "alpha1": float(prior_init[0]),
-            "beta1": float(prior_init[1]),
-            "alpha2": float(prior_init[2]),
-            "beta2": float(prior_init[3]),
-            "w": float(prior_init[4]),
-        }
+    opts = {"maxiter": 500}
+    if minimization_options:
+        opts.update(minimization_options)
 
-    input_params = {
-        "relative_risk": relative_risk,
-        "min_events": min_events,
-        "decision_metric": decision_metric,
-        "decision_thres": decision_thres,
-        "ranking_statistic": ranking_statistic,
-        "truncate": truncate,
-        "truncate_thres": truncate_thres,
-        "expected_method": expected_method,
-        "method_alpha": method_alpha,
-        "minimization_method": minimization_method,
-    }
-
-    priors = np.asarray(
-        [
-            prior_init["alpha1"],
-            prior_init["beta1"],
-            prior_init["alpha2"],
-            prior_init["beta2"],
-            prior_init["w"],
-        ],
-        dtype=np.float64,
-    )
-
-    # 1. Extract sparse contingency matrix and exact marginal totals
-    mat, row_totals, col_totals, products, aes, N = _extract_sparse_data(container)
-
-    n11 = np.asarray(mat.data, dtype=np.float64)
-    rows = mat.row
-    cols = mat.col
-    n1j = row_totals[rows]
-    ni1 = col_totals[cols]
-
-    expected = calculate_expected(N, n1j, ni1, n11, expected_method, method_alpha)
-    code_convergence = "User-provided priors"
-
-    # 2. Prior optimization on non-zero entries (truncate=True accounts for missing N11=0 cells)
-    if prior_param is None:
-        priors, code_convergence = _optimize_gps_priors(
-            container=container,
-            priors=priors,
-            truncate=truncate,
-            truncate_thres=truncate_thres,
-            n11=n11,
-            expected=expected,
-            N=N,
-            minimization_method=minimization_method,
-            minimization_bounds=minimization_bounds,
-            minimization_options=minimization_options,
+    if not truncate:
+        gammaln_n11_1 = gammaln(n11 + 1.0)
+        p_out = minimize(
+            non_truncated_likelihood,
+            x0=priors,
+            args=(n11, expected, gammaln_n11_1),
+            options=opts,
+            method=minimization_method,
+            bounds=minimization_bounds,
         )
     else:
-        priors = np.asarray(prior_param, dtype=np.float64)
+        trunc = truncate_thres - 1.0
+        mask_trunc = n11 >= truncate_thres
+        n11_trunc = n11[mask_trunc]
+        E_trunc = expected[mask_trunc]
+        gammaln_n11_1 = gammaln(n11_trunc + 1.0)
+        p_out = minimize(
+            truncated_likelihood,
+            x0=priors,
+            args=(n11_trunc, E_trunc, trunc, gammaln_n11_1),
+            options=opts,
+            method=minimization_method,
+            bounds=minimization_bounds,
+        )
 
-    computation_params = pd.DataFrame.from_dict(
-        {
-            "minimization_method": minimization_method,
-            "minimization_bounds": minimization_bounds,
-            "priori_init": prior_init,
-            "method_alpha": method_alpha,
-            "expected_method": expected_method,
-            "minimization_options": minimization_options,
-        },
-        orient="index",
-        columns=["Value"],
+    priors_opt = p_out.x
+    if np.any(priors_opt < 0) or priors_opt[4] > 1:
+        warnings.warn(
+            f"Calculated priors violate distribution constraints. Current priors: {priors_opt}."
+        )
+    return priors_opt, str(p_out.message)
+
+
+def _compute_posterior_gps(
+    n11: np.ndarray,
+    expected: np.ndarray,
+    priors: np.ndarray,
+    relative_risk: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute EBGM, EB05, EB95, and posterior probability P(H0) from fitted priors."""
+    a1, b1, a2, b2, w = priors
+    p1 = np.clip(b1 / (b1 + expected + 1e-10), 1e-10, 1.0 - 1e-10)
+    p2 = np.clip(b2 / (b2 + expected + 1e-10), 1e-10, 1.0 - 1e-10)
+    gl_post = gammaln(n11 + 1.0)
+
+    q1 = np.exp(gammaln(n11 + a1) - gl_post - gammaln(a1) + a1 * np.log(p1) + n11 * np.log(1.0 - p1))
+    q2 = np.exp(gammaln(n11 + a2) - gl_post - gammaln(a2) + a2 * np.log(p2) + n11 * np.log(1.0 - p2))
+    den = w * q1 + (1.0 - w) * q2
+    Qn = np.where(den > 0, w * q1 / np.where(den > 0, den, 1.0), w)
+
+    # Exact Gamma CDF P(lambda <= relative_risk | posterior): gdtr(rate, shape, x)
+    posterior_probability = (
+        Qn * gdtr(np.maximum(b1 + expected, 1e-10), a1 + n11, relative_risk)
+        + (1.0 - Qn) * gdtr(np.maximum(b2 + expected, 1e-10), a2 + n11, relative_risk)
     )
 
-    # 3. Sparse filtering (remove cells below min_events)
-    if min_events > 1:
-        mask = n11 >= min_events
-        n11 = n11[mask]
-        rows = rows[mask]
-        cols = cols[mask]
-        expected = expected[mask]
-        n1j = n1j[mask]
-        ni1 = ni1[mask]
+    eblog2 = (
+        Qn * (digamma(a1 + n11) - np.log(np.maximum(b1 + expected, 1e-10)))
+        + (1.0 - Qn) * (digamma(a2 + n11) - np.log(np.maximum(b2 + expected, 1e-10)))
+    ) / np.log(2.0)
+    ebgm = np.power(2.0, np.asarray(eblog2, dtype=np.float64))
 
-    n10 = n1j - n11
-    n01 = ni1 - n11
-    n00 = N - (n11 + n10 + n01)
+    EB05 = quantiles(0.05, Qn, a1 + n11, b1 + expected, a2 + n11, b2 + expected)
+    EB95 = quantiles(0.95, Qn, a1 + n11, b1 + expected, a2 + n11, b2 + expected)
 
-    # 4. Posterior Bayesian calculations restricted to active coordinates
-    _p_post1 = np.clip(priors[1] / (priors[1] + expected + 1e-10), 1e-10, 1.0 - 1e-10)
-    _p_post2 = np.clip(priors[3] / (priors[3] + expected + 1e-10), 1e-10, 1.0 - 1e-10)
-    gammaln_n11_1_post = gammaln(n11 + 1.0)
-    r1, r2 = priors[0], priors[2]
+    return ebgm, EB05, EB95, posterior_probability
 
-    log_qdb1 = gammaln(n11 + r1) - gammaln_n11_1_post - gammaln(r1) + r1 * np.log(_p_post1) + n11 * np.log(1.0 - _p_post1)
-    log_qdb2 = gammaln(n11 + r2) - gammaln_n11_1_post - gammaln(r2) + r2 * np.log(_p_post2) + n11 * np.log(1.0 - _p_post2)
-    qdb1 = np.exp(log_qdb1)
-    qdb2 = np.exp(log_qdb2)
 
-    _qn_denom = priors[4] * qdb1 + (1.0 - priors[4]) * qdb2
-    Qn = np.where(_qn_denom > 0, priors[4] * qdb1 / _qn_denom, priors[4])
-
-    gd1 = gdtr(relative_risk, priors[0] + n11, np.maximum(priors[1] + expected, 1e-10))
-    gd2 = gdtr(relative_risk, priors[2] + n11, np.maximum(priors[3] + expected, 1e-10))
-    posterior_probability = Qn * gd1 + (1.0 - Qn) * gd2
-
-    dg1 = digamma(priors[0] + n11)
-    dgterm1 = dg1 - np.log(np.maximum(priors[1] + expected, 1e-10))
-    dg2 = digamma(priors[2] + n11)
-    dgterm2 = dg2 - np.log(np.maximum(priors[3] + expected, 1e-10))
-    EBlog2 = (np.log(2) ** -1) * (Qn * dgterm1 + (1.0 - Qn) * dgterm2)
-    ebgm = np.power(2.0, np.asarray(EBlog2, dtype=np.float64))
-
-    # Calculation of the Lower Bound (EB05) and Upper Bound (EB95)
-    EB05 = quantiles(
-        0.05,
-        Qn,
-        priors[0] + n11,
-        priors[1] + expected,
-        priors[2] + n11,
-        priors[3] + expected,
-    )
-    EB95 = quantiles(
-        0.95,
-        Qn,
-        priors[0] + n11,
-        priors[1] + expected,
-        priors[2] + n11,
-        priors[3] + expected,
-    )
-
-    # 5. Build result container and attach sparse output matrices
+def _build_gps_result(
+    mat_shape: tuple[int, int],
+    rows: np.ndarray,
+    cols: np.ndarray,
+    products: np.ndarray,
+    aes: np.ndarray,
+    n11: np.ndarray,
+    n10: np.ndarray,
+    n01: np.ndarray,
+    n00: np.ndarray,
+    ebgm: np.ndarray,
+    EB05: np.ndarray,
+    EB95: np.ndarray,
+    posterior_probability: np.ndarray,
+    priors: np.ndarray,
+    code_convergence: str,
+    criterion: str,
+    extra_params: dict | None = None,
+) -> Container:
+    """Assemble output Container with sparse matrices, metrics (FDR, Se, FNR, Sp), and signals."""
     RES = Container(params=True)
-    RES.param["input_params"] = input_params
-    RES.param["computation_params"] = computation_params
-    RES.param["convergence"] = code_convergence
     RES.param["priors"] = priors
+    RES.param["convergence"] = code_convergence
+    if extra_params:
+        RES.param.update(extra_params)
 
-    RES.sparse_ebgm = sparse.coo_matrix((ebgm, (rows, cols)), shape=mat.shape)
-    RES.sparse_eb05 = sparse.coo_matrix((EB05, (rows, cols)), shape=mat.shape)
+    RES.sparse_ebgm = sparse.coo_matrix((ebgm, (rows, cols)), shape=mat_shape)
+    RES.sparse_eb05 = sparse.coo_matrix((EB05, (rows, cols)), shape=mat_shape)
 
     RES.all_signals = pd.DataFrame(
         {
@@ -368,7 +266,7 @@ def gps(
 
     RES.all_signals = RES.all_signals.sort_values(by=["EB05"], ascending=False).reset_index(drop=True)
 
-    p_h0 = RES.all_signals["p_{H0}"].values
+    p_h0 = RES.all_signals["p_{H0}"].to_numpy(dtype=np.float64)
     p_h1 = 1.0 - p_h0
 
     total_true_signals = np.sum(p_h1)
@@ -376,7 +274,7 @@ def gps(
 
     true_positives_cum = np.cumsum(p_h1)
     false_positives_cum = np.cumsum(p_h0)
-    post_range = np.arange(1, len(p_h0) + 1)
+    post_range = np.arange(1, len(p_h0) + 1, dtype=np.float64)
 
     RES.all_signals["FDR"] = false_positives_cum / post_range
     RES.all_signals["Se"] = true_positives_cum / (total_true_signals + 1e-7)
@@ -392,8 +290,124 @@ def gps(
 
     RES.signals = RES.all_signals[signal_mask].copy()
     RES.num_signals = len(RES.signals)
-
     return RES
+
+
+def gps(
+    container: Container,
+    min_events: int = 4,
+    truncate: bool = False,
+    maxiter: int = 500,
+    criterion: str = "EB05>=2",
+    prior_param: list[float] | np.ndarray | None = None,
+) -> Container:
+    """Compute Multi-item Gamma Poisson Shrinkage (GPS) aligned with signal_methods.py."""
+    relative_risk = 1.0
+    truncate_thres = 1.0
+    expected_method = "mantel-haentzel"
+    method_alpha = 1.0
+    minimization_method = "SLSQP"
+    minimization_bounds = GPS_BOUNDS
+    minimization_options = {"maxiter": maxiter}
+
+    prior_init = {
+        "alpha1": float(GPS_INIT[0]),
+        "beta1": float(GPS_INIT[1]),
+        "alpha2": float(GPS_INIT[2]),
+        "beta2": float(GPS_INIT[3]),
+        "w": float(GPS_INIT[4]),
+    }
+
+    input_params = {
+        "relative_risk": relative_risk,
+        "min_events": min_events,
+        "truncate": truncate,
+        "truncate_thres": truncate_thres,
+        "expected_method": expected_method,
+        "method_alpha": method_alpha,
+        "minimization_method": minimization_method,
+    }
+
+    # 1. Extract sparse contingency matrix and report-level marginal totals
+    mat, row_totals, col_totals, products, aes, N = _extract_sparse_data(container)
+
+    n11 = np.asarray(mat.data, dtype=np.float64)
+    rows = mat.row
+    cols = mat.col
+    n1j = row_totals[rows]
+    ni1 = col_totals[cols]
+    expected = calculate_expected(N, n1j, ni1, n11, expected_method, method_alpha)
+
+    # 2. Prior estimation (or direct reuse of precomputed priors)
+    if prior_param is None:
+        priors, code_convergence = _optimize_gps_priors(
+            priors=GPS_INIT.copy(),
+            truncate=truncate,
+            truncate_thres=truncate_thres,
+            n11=n11,
+            expected=expected,
+            minimization_method=minimization_method,
+            minimization_bounds=minimization_bounds,
+            minimization_options=minimization_options,
+        )
+    else:
+        priors = np.asarray(prior_param, dtype=np.float64)
+        code_convergence = "User-provided priors"
+
+    computation_params = pd.DataFrame.from_dict(
+        {
+            "minimization_method": minimization_method,
+            "minimization_bounds": minimization_bounds,
+            "priori_init": prior_init,
+            "method_alpha": method_alpha,
+            "expected_method": expected_method,
+            "minimization_options": minimization_options,
+        },
+        orient="index",
+        columns=["Value"],
+    )
+
+    # 3. Filter cells below min_events
+    if min_events > 1:
+        mask = n11 >= min_events
+        n11 = n11[mask]
+        rows = rows[mask]
+        cols = cols[mask]
+        expected = expected[mask]
+        n1j = n1j[mask]
+        ni1 = ni1[mask]
+
+    n10 = n1j - n11
+    n01 = ni1 - n11
+    n00 = N - (n11 + n10 + n01)
+
+    # 4. Posterior calculations & output Container
+    ebgm, EB05, EB95, posterior_probability = _compute_posterior_gps(
+        n11, expected, priors, relative_risk=relative_risk
+    )
+
+    return _build_gps_result(
+        mat_shape=mat.shape,
+        rows=rows,
+        cols=cols,
+        products=products,
+        aes=aes,
+        n11=n11,
+        n10=n10,
+        n01=n01,
+        n00=n00,
+        ebgm=ebgm,
+        EB05=EB05,
+        EB95=EB95,
+        posterior_probability=posterior_probability,
+        priors=priors,
+        code_convergence=code_convergence,
+        criterion=criterion,
+        extra_params={
+            "input_params": input_params,
+            "computation_params": computation_params,
+        },
+    )
 
 
 def gps_sampled(
@@ -405,12 +419,10 @@ def gps_sampled(
     truncate_thres: float = 1.0,
     maxiter: int = 500,
     criterion: str = "EB05>=2",
+    prior_param: list[float] | np.ndarray | None = None,
 ) -> Container:
-    """Subsampled version of GPS using Container sparse getters for prior estimation."""
-    priors = np.asarray([0.2041, 0.05816, 1.415, 1.838, 0.0969], dtype=np.float64)
-    bounds = ((EPS, 20), (EPS, 10), (EPS, 20), (EPS, 10), (0, 1))
-
-    # 1. Extract sparse contingency matrix and exact marginal totals
+    """Subsampled GPS strictly matching fit_gps_priors & gps_stats in signal_methods.py."""
+    # 1. Extract sparse contingency matrix and report-level marginal totals
     mat, row_totals, col_totals, products, aes, N = _extract_sparse_data(container)
 
     n11 = np.asarray(mat.data, dtype=np.float64)
@@ -427,33 +439,27 @@ def gps_sampled(
         n11_fit, E_fit = n11, expected
 
     total_pairs = len(n11_fit)
-    if max_points is not None and total_pairs > max_points:
-        rng = np.random.default_rng(seed)
-        idx = rng.choice(total_pairs, max_points, replace=False)
-        n11_fit, E_fit = n11_fit[idx], E_fit[idx]
+    if prior_param is None:
+        if max_points is not None and total_pairs > max_points:
+            rng = np.random.default_rng(seed)
+            idx = rng.choice(total_pairs, max_points, replace=False)
+            n11_fit, E_fit = n11_fit[idx], E_fit[idx]
 
-    gl_fit = gammaln(n11_fit + 1.0)
-
-    if not truncate:
-        res = minimize(
-            non_truncated_likelihood,
-            x0=priors,
-            args=(n11_fit, E_fit, gl_fit),
-            method="SLSQP",
-            bounds=bounds,
-            options={"maxiter": maxiter},
+        priors, code_convergence = _optimize_gps_priors(
+            priors=GPS_INIT.copy(),
+            truncate=truncate,
+            truncate_thres=truncate_thres,
+            n11=n11_fit,
+            expected=E_fit,
+            minimization_method="SLSQP",
+            minimization_bounds=GPS_BOUNDS,
+            minimization_options={"maxiter": maxiter},
         )
+        fitted_on = len(n11_fit)
     else:
-        res = minimize(
-            truncated_likelihood,
-            x0=priors,
-            args=(n11_fit, E_fit, truncate_thres - 1.0, gl_fit),
-            method="SLSQP",
-            bounds=bounds,
-            options={"maxiter": maxiter},
-        )
-    priors = res.x
-    code_convergence = str(res.message)
+        priors = np.asarray(prior_param, dtype=np.float64)
+        code_convergence = "User-provided priors"
+        fitted_on = 0
 
     # 2. Filter pairs below min_events
     if min_events > 1:
@@ -469,80 +475,34 @@ def gps_sampled(
     n01 = ni1 - n11
     n00 = N - (n11 + n10 + n01)
 
-    # 3. Posterior calculations
-    a1, b1, a2, b2, w = priors
-    p1 = np.clip(b1 / (b1 + expected + 1e-10), 1e-10, 1.0 - 1e-10)
-    p2 = np.clip(b2 / (b2 + expected + 1e-10), 1e-10, 1.0 - 1e-10)
-    gl_post = gammaln(n11 + 1.0)
-
-    q1 = np.exp(gammaln(n11 + a1) - gl_post - gammaln(a1) + a1 * np.log(p1) + n11 * np.log(1.0 - p1))
-    q2 = np.exp(gammaln(n11 + a2) - gl_post - gammaln(a2) + a2 * np.log(p2) + n11 * np.log(1.0 - p2))
-    den = w * q1 + (1.0 - w) * q2
-    Qn = np.where(den > 0, w * q1 / np.where(den > 0, den, 1.0), w)
-
-    p_h0 = (
-        Qn * gdtr(1.0, a1 + n11, np.maximum(b1 + expected, 1e-10))
-        + (1.0 - Qn) * gdtr(1.0, a2 + n11, np.maximum(b2 + expected, 1e-10))
-    )
-    eblog2 = (
-        Qn * (digamma(a1 + n11) - np.log(np.maximum(b1 + expected, 1e-10)))
-        + (1.0 - Qn) * (digamma(a2 + n11) - np.log(np.maximum(b2 + expected, 1e-10)))
-    ) / np.log(2)
-    ebgm = np.power(2.0, np.asarray(eblog2, dtype=np.float64))
-
-    EB05 = quantiles(0.05, Qn, a1 + n11, b1 + expected, a2 + n11, b2 + expected)
-    EB95 = quantiles(0.95, Qn, a1 + n11, b1 + expected, a2 + n11, b2 + expected)
-
-    # 4. Build result container
-    RES = Container(params=True)
-    RES.param["priors"] = priors
-    RES.param["convergence"] = code_convergence
-    RES.param["sampling_info"] = {
-        "max_points": max_points,
-        "seed": seed,
-        "total_candidate_pairs": total_pairs,
-        "fitted_on": len(n11_fit),
-    }
-
-    RES.sparse_ebgm = sparse.coo_matrix((ebgm, (rows, cols)), shape=mat.shape)
-    RES.sparse_eb05 = sparse.coo_matrix((EB05, (rows, cols)), shape=mat.shape)
-
-    RES.all_signals = pd.DataFrame(
-        {
-            "Product": products[rows],
-            "Adverse Event": aes[cols],
-            "EBGM": ebgm,
-            "EB05": EB05,
-            "EB95": EB95,
-            "N_{11}": n11,
-            "N_{10}": n10,
-            "N_{01}": n01,
-            "N_{00}": n00,
-            "p_{H0}": p_h0,
-        }
+    # 3. Posterior calculations & output Container
+    ebgm, EB05, EB95, posterior_probability = _compute_posterior_gps(
+        n11, expected, priors, relative_risk=1.0
     )
 
-    RES.all_signals = RES.all_signals.sort_values(by=["EB05"], ascending=False).reset_index(drop=True)
-
-    p_null = RES.all_signals["p_{H0}"].values
-    p_alt = 1.0 - p_null
-    tp_cum = np.cumsum(p_alt)
-    fp_cum = np.cumsum(p_null)
-    tot_pos = np.sum(p_alt)
-    tot_neg = np.sum(p_null)
-
-    RES.all_signals["FDR"] = fp_cum / np.arange(1, len(p_null) + 1)
-    RES.all_signals["Se"] = tp_cum / (tot_pos + 1e-7)
-    RES.all_signals["FNR"] = (tot_pos - tp_cum) / (tot_pos + 1e-7)
-    RES.all_signals["Sp"] = (tot_neg - fp_cum) / (tot_neg + 1e-7)
-
-    if criterion == "EB05>=2":
-        signal_mask = RES.all_signals["EB05"] >= 2.0
-    elif criterion == "EB05 > 1 & EBGM >=2":
-        signal_mask = (RES.all_signals["EBGM"] >= 2.0) & (RES.all_signals["EB05"] > 1.0)
-    else:
-        signal_mask = pd.Series(True, index=RES.all_signals.index)
-
-    RES.signals = RES.all_signals[signal_mask].copy()
-    RES.num_signals = len(RES.signals)
-    return RES
+    return _build_gps_result(
+        mat_shape=mat.shape,
+        rows=rows,
+        cols=cols,
+        products=products,
+        aes=aes,
+        n11=n11,
+        n10=n10,
+        n01=n01,
+        n00=n00,
+        ebgm=ebgm,
+        EB05=EB05,
+        EB95=EB95,
+        posterior_probability=posterior_probability,
+        priors=priors,
+        code_convergence=code_convergence,
+        criterion=criterion,
+        extra_params={
+            "sampling_info": {
+                "max_points": max_points,
+                "seed": seed,
+                "total_candidate_pairs": total_pairs,
+                "fitted_on": fitted_on,
+            }
+        },
+    )
