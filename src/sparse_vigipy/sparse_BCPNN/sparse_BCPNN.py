@@ -14,16 +14,19 @@ def trigamma(x):
 
 
 def bcpnn(
-    container,
-    min_events=4,
-    MC=False,
-    num_MC=10000,
-):
+    container: Container,
+    min_events: int = 4,
+    MC: bool = False,
+    num_MC: int = 10000,
+) -> Container:
     """
-    Bayesian Confidence Propagation Neural Network (BCPNN) using sparse contingency structures.
+    Bayesian Confidence Propagation Neural Network (BCPNN) using sparse contingency structures:
+    - Marginal totals computed at the report level (matching signal_methods.py & fast_profiles.py)
+    - Analytical mode (MC=False) strictly identical to bcpnn_stats in signal_methods.py
+    - Optional Monte Carlo mode (MC=True) via parallel Numba kernel
 
     Arguments:
-        container: A Container object produced by convert() from sparse_data_prep.py
+        container: A Container object produced by Container.from_raw_tables() or convert()
         min_events (int): Minimum number of AE reports to be considered a candidate signal
         MC (bool): Use Monte Carlo simulations via Numba parallel kernel
         num_MC (int): Number of MC simulations to run per cell
@@ -49,9 +52,13 @@ def bcpnn(
         valid_cols = cont.col[mask]
         n11 = np.asarray(cont.data[mask], dtype=np.float64)
 
-        # Compute marginal sums directly on the sparse matrix
-        row_sums = np.asarray(container.contingency.sum(axis=1)).ravel()
-        col_sums = np.asarray(container.contingency.sum(axis=0)).ravel()
+        # Compute marginal sums at the REPORT level (matching signal_methods.py & fast_profiles.py)
+        if hasattr(container, "product_features") and hasattr(container, "event_outcomes"):
+            row_sums = np.asarray(container.get_sparse_features().sum(axis=0), dtype=np.float64).ravel()
+            col_sums = np.asarray(container.get_sparse_outcomes().sum(axis=0), dtype=np.float64).ravel()
+        else:
+            row_sums = np.asarray(container.contingency.sum(axis=1), dtype=np.float64).ravel()
+            col_sums = np.asarray(container.contingency.sum(axis=0), dtype=np.float64).ravel()
 
         n1j = row_sums[valid_rows]
         ni1 = col_sums[valid_cols]
@@ -84,6 +91,7 @@ def bcpnn(
     n00 = N - (n11 + n10 + n01)
 
     if not MC:
+        # Analytical BCPNN (strictly identical to bcpnn_stats in signal_methods.py)
         p1 = 1.0 + n1j
         p2 = 1.0 + N - n1j
         q1 = 1.0 + ni1
@@ -91,37 +99,32 @@ def bcpnn(
         r1 = 1.0 + n11
         r2b = N - n11 - 1.0 + (2.0 + N) ** 2 / (q1 * p1)
 
-        # 1. Compute the Information Component (IC)
-        digamma_term = (
-            digamma(r1)
-            - digamma(r1 + r2b)
-            - (digamma(p1) - digamma(p1 + p2) + digamma(q1) - digamma(q1 + q2))
-        )
-        IC = np.asarray((np.log(2.0) ** -1) * digamma_term, dtype=np.float64)
-
-        # 2. Compute the IC Variance (summing Beta component variances)
-        IC_variance = np.asarray(
-            (np.log(2.0) ** -2)
-            * (
-                (trigamma(r1) - trigamma(r1 + r2b))
-                + (trigamma(p1) - trigamma(p1 + p2))
-                + (trigamma(q1) - trigamma(q1 + q2))
-            ),
+        IC = np.asarray(
+            (
+                digamma(r1)
+                - digamma(r1 + r2b)
+                - (digamma(p1) - digamma(p1 + p2) + digamma(q1) - digamma(q1 + q2))
+            )
+            / np.log(2.0),
             dtype=np.float64,
         )
 
-        # 3. Compute posterior probabilities and 95% confidence interval bounds
-        relative_risk = 1.0
+        IC_variance = np.asarray(
+            (
+                (trigamma(r1) - trigamma(r1 + r2b))
+                + (trigamma(p1) - trigamma(p1 + p2))
+                + (trigamma(q1) - trigamma(q1 + q2))
+            )
+            / (np.log(2.0) ** 2),
+            dtype=np.float64,
+        )
+
         IC_std = np.sqrt(IC_variance)
-
-        # P(H0): Posterior probability that IC <= log2(relative_risk)
-        posterior_prob = norm.cdf(np.log2(relative_risk), loc=IC, scale=IC_std)
-
-        # 95% Credibility Interval bounds for the IC index
-        lower_bound = norm.ppf(0.025, loc=IC, scale=IC_std)
-        upper_bound = norm.ppf(0.975, loc=IC, scale=IC_std)
+        lower_bound = norm.ppf(0.025, IC, IC_std)
+        upper_bound = norm.ppf(0.975, IC, IC_std)
+        posterior_prob = norm.cdf(0.0, IC, IC_std)
     else:
-        # Vectorized Dirichlet priors
+        # Vectorized Dirichlet priors for Monte Carlo mode
         q1j = (n1j + 0.5) / (N + 1.0)
         qi1 = (ni1 + 0.5) / (N + 1.0)
         qi0 = (N - ni1 + 0.5) / (N + 1.0)
@@ -134,7 +137,6 @@ def bcpnn(
         g01 = (q0j * qi1 * a_) + n01
         g00 = (q0j * qi0 * a_) + n00
 
-        # Direct parallelized Numba kernel execution across all active sparse entries
         posterior_prob, IC, lower_bound, upper_bound = _bcpnn_numba_kernel(
             g11, g10, g01, g00, num_MC
         )
@@ -153,9 +155,7 @@ def bcpnn(
     upper_bound = upper_bound[sort_idx]
     p_h0 = np.asarray(posterior_prob[sort_idx], dtype=np.float64)
 
-    # -------------------------------
     # Compute FDR, FNR, Se and Sp
-    # -------------------------------
     p_h1 = 1.0 - p_h0
     total_true_signals = np.sum(p_h1)
     total_true_negatives = np.sum(p_h0)
