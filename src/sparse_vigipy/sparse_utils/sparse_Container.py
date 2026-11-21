@@ -5,7 +5,7 @@ from scipy.sparse import issparse, csr_matrix
 
 
 def _extract_active_substances(value):
-    """Extraction et normalisation des substances actives (aligné sur fast_profiles.py)."""
+    """Extraction et normalisation strictement identique à fast_profiles.py."""
     if pd.isna(value):
         return []
     text = str(value).strip()
@@ -19,7 +19,7 @@ def _extract_active_substances(value):
     if left != -1 and right != -1 and right > left + 1:
         substances = [x.strip() for x in text[left + 1:right].split(",") if x.strip()]
     else:
-        base = text.split(" (", 1).strip()
+        base = text.split(" (", 1)[0].strip()
         substances = [x.strip() for x in base.split(",") if x.strip()] if base else []
 
     invalid = {"", "N/A", "NOT AVAILABLE", "NOT REPORTED", "UNKNOWN"}
@@ -42,13 +42,13 @@ class Container:
         suspects_df: pd.DataFrame,
         reactions_df: pd.DataFrame,
     ) -> "Container":
-        """Construit un Container creux compatible avec gps, bcpnn, ror et prr."""
+        """Construit un Container creux 100 % aligné sur fast_profiles.py et signal_methods.py."""
         # 1. Population unique (N)
         pop_ids = pd.Index(icsr_df["safety_report_id"].dropna().unique())
         N = len(pop_ids)
         pop_set = set(pop_ids)
 
-        # 2. Produits (substances actives dédoublonnées par signalement)
+        # 2. Substances actives dédoublonnées par signalement
         sub_rows = []
         for row in suspects_df[["safety_report_id", "drug"]].itertuples(index=False):
             if row.safety_report_id in pop_set:
@@ -67,7 +67,7 @@ class Container:
             product_names = pd.Index([])
             sf = sparse.csr_matrix((N, 0), dtype=np.float32)
 
-        # 3. Réactions (dédoublonnées par signalement)
+        # 3. Réactions dédoublonnées par signalement
         pts = reactions_df["reaction_pt"].astype("string").str.strip()
         valid_rx = pts.notna() & (pts != "") & reactions_df["safety_report_id"].isin(pop_set)
 
@@ -87,11 +87,11 @@ class Container:
             ae_names = pd.Index([])
             so = sparse.csr_matrix((N, 0), dtype=np.float32)
 
-        # 4. Matrice de contingence creuse (Produits x Réactions) en float64
+        # 4. Matrice de contingence creuse (Produits x Réactions)
         contingency = (sf.astype(np.float64).T @ so.astype(np.float64)).tocoo()
         contingency.eliminate_zeros()
 
-        # 5. Assemblage du Container (compatible gps + bcpnn/ror/prr)
+        # 5. Assemblage du Container
         container = cls(params=False)
         container.type = "individual"
         container.product_features = sf
@@ -108,7 +108,6 @@ class Container:
         return container
 
     def get_sparse_features(self):
-        """Return product_features as a SciPy CSR sparse matrix."""
         if not hasattr(self, "product_features"):
             raise AttributeError("Container has no 'product_features' attribute.")
         if issparse(self.product_features):
@@ -118,7 +117,6 @@ class Container:
         return csr_matrix(self.product_features)
 
     def get_sparse_outcomes(self):
-        """Return event_outcomes as a SciPy CSR sparse matrix."""
         if not hasattr(self, "event_outcomes"):
             raise AttributeError("Container has no 'event_outcomes' attribute.")
         if issparse(self.event_outcomes):
@@ -131,4 +129,5 @@ class Container:
         with pd.ExcelWriter(name) as writer:
             self.signals.to_excel(writer, sheet_name="Signals", index=index)
             self.all_signals.to_excel(writer, sheet_name="all_data", index=index)
+
 
