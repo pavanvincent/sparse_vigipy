@@ -5,18 +5,27 @@ from scipy.stats import norm
 from ..sparse_utils.sparse_Container import Container
 
 
+def _exp_safe(x: np.ndarray) -> np.ndarray:
+    """Exponentielle protégée contre l'overflow float64 (alignée sur signal_methods.py)."""
+    out = np.full_like(x, np.inf, dtype=np.float64)
+    ok = x <= np.log(np.finfo(np.float64).max)
+    out[ok] = np.exp(x[ok])
+    return out
+
+
 def ror(
-    container,
-    min_events=4,
-):
+    container: Container,
+    min_events: int = 4,
+) -> Container:
     """
     Calculate the Reporting Odds Ratio (ROR) using sparse contingency structures:
+    - Marginal totals computed at the report level (matching signal_methods.py)
     - Confidence Interval [LB, UB] at 95% estimated using Woolf's method
-    - Signal Detection Rate (SDR) if log(LB) > 0
+    - Signal Detection Rate (SDR) if LB > 1 (log(LB) > 0)
     - p-value computed using a one-sided Wald test
 
     Arguments:
-        container: A Container object produced by convert() from sparse_data_prep.py
+        container: A Container object produced by Container.from_raw_tables() or convert()
         min_events: Minimum number of AE reports to be considered a candidate signal
 
     Returns:
@@ -34,9 +43,13 @@ def ror(
         valid_cols = cont.col[mask]
         n11 = np.asarray(cont.data[mask], dtype=np.float64)
 
-        # Compute marginal sums directly on the sparse matrix
-        row_sums = np.asarray(container.contingency.sum(axis=1)).ravel()
-        col_sums = np.asarray(container.contingency.sum(axis=0)).ravel()
+        # Compute marginal sums at the REPORT level (matching signal_methods.py & fast_profiles.py)
+        if hasattr(container, "product_features") and hasattr(container, "event_outcomes"):
+            row_sums = np.asarray(container.get_sparse_features().sum(axis=0), dtype=np.float64).ravel()
+            col_sums = np.asarray(container.get_sparse_outcomes().sum(axis=0), dtype=np.float64).ravel()
+        else:
+            row_sums = np.asarray(container.contingency.sum(axis=1), dtype=np.float64).ravel()
+            col_sums = np.asarray(container.contingency.sum(axis=0), dtype=np.float64).ravel()
 
         n1j = row_sums[valid_rows]
         ni1 = col_sums[valid_cols]
@@ -49,8 +62,8 @@ def ror(
             DATA = container.data
             if min_events > 1:
                 DATA = DATA[DATA["events"] >= min_events]
-            products = DATA["product_name"].values
-            aes = DATA["ae_name"].values
+            products = DATA["product_name"].to_numpy()
+            aes = DATA["ae_name"].to_numpy()
     else:
         # Fallback if only container.data is available
         DATA = container.data
@@ -61,38 +74,27 @@ def ror(
         n11 = np.asarray(DATA["events"], dtype=np.float64)
         n1j = np.asarray(DATA["product_aes"], dtype=np.float64)
         ni1 = np.asarray(DATA["count_across_brands"], dtype=np.float64)
-        products = DATA["product_name"].values
-        aes = DATA["ae_name"].values
+        products = DATA["product_name"].to_numpy()
+        aes = DATA["ae_name"].to_numpy()
 
-    # Compute 2x2 contingency cells
+    # Compute 2x2 contingency cells (identical to ror_stats in signal_methods.py)
     n10 = n1j - n11 + 1e-7
     n01 = ni1 - n11 + 1e-7
     n00 = N - (n11 + n10 + n01)
 
-    # Compute log(ROR) and VAR(log(ROR)) using Woolf's method
+    # Compute log(ROR) and SD using Woolf's method
     log_ror = np.log(n11 * n00 / (n10 * n01))
-    var_log_ror = 1.0 / n11 + 1.0 / n10 + 1.0 / n01 + 1.0 / n00
-    std_err = np.sqrt(var_log_ror)
+    std_err = np.sqrt(1.0 / n11 + 1.0 / n10 + 1.0 / n01 + 1.0 / n00)
 
-    # Compute 95% confidence interval
-    log_LB = norm.ppf(0.025, log_ror, std_err)
-    log_UB = norm.ppf(0.975, log_ror, std_err)
-
-    # Guard against overflow when log_UB > max_log_value
-    max_log_value = np.log(np.finfo(np.float64).max)
-    ub_exp = np.full_like(log_UB, np.inf)
-    safe_mask = log_UB <= max_log_value
-    ub_exp[safe_mask] = np.exp(log_UB[safe_mask])
-
-    # Compute one-sided p-value under H0: ROR = 1
-    ror_H0 = 1.0
-    pval_uni = 1.0 - norm.cdf(log_ror, np.log(ror_H0), std_err)
-    pval_uni = np.clip(pval_uni, 0.0, 1.0)
-
-    # Count signals using decision criterion log_LB > 0
-    num_signals = int((log_LB > 0).sum())
+    # Compute 95% confidence interval and one-sided p-value
     ror_exp = np.exp(log_ror)
-    lb_exp = np.exp(log_LB)
+    lb_exp = np.exp(norm.ppf(0.025, log_ror, std_err))
+    ub_exp = _exp_safe(norm.ppf(0.975, log_ror, std_err))
+    pval_uni = np.clip(1.0 - norm.cdf(log_ror, 0.0, std_err), 0.0, 1.0)
+
+    # Signal criterion: LB > 1 (equivalent to log_LB > 0)
+    signal_mask = lb_exp > 1.0
+    num_signals = int(signal_mask.sum())
 
     # Build result Container
     RC = Container()
@@ -114,8 +116,8 @@ def ror(
             "p-value": pval_uni,
         },
         index=np.arange(len(n11)),
-    ).sort_values(by=["LB(CI 95%)"], ascending=False)
+    ).sort_values(by=["LB(CI 95%)"], ascending=False).reset_index(drop=True)
 
-    RC.signals = RC.all_signals.iloc[0:num_signals]
+    RC.signals = RC.all_signals.iloc[0:num_signals].copy()
     RC.num_signals = num_signals
     return RC
