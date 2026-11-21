@@ -19,7 +19,7 @@ def _extract_active_substances(value):
     if left != -1 and right != -1 and right > left + 1:
         substances = [x.strip() for x in text[left + 1:right].split(",") if x.strip()]
     else:
-        base = text.split(" (", 1)[0].strip()
+        base = text.split(" (", 1).strip()
         substances = [x.strip() for x in base.split(",") if x.strip()] if base else []
 
     invalid = {"", "N/A", "NOT AVAILABLE", "NOT REPORTED", "UNKNOWN"}
@@ -42,13 +42,13 @@ class Container:
         suspects_df: pd.DataFrame,
         reactions_df: pd.DataFrame,
     ) -> "Container":
-        """Construit un Container 'individual' creux aligné sur fast_profiles.py."""
+        """Construit un Container creux compatible avec gps, bcpnn, ror et prr."""
         # 1. Population unique (N)
         pop_ids = pd.Index(icsr_df["safety_report_id"].dropna().unique())
         N = len(pop_ids)
+        pop_set = set(pop_ids)
 
         # 2. Produits (substances actives dédoublonnées par signalement)
-        pop_set = set(pop_ids)
         sub_rows = []
         for row in suspects_df[["safety_report_id", "drug"]].itertuples(index=False):
             if row.safety_report_id in pop_set:
@@ -87,13 +87,23 @@ class Container:
             ae_names = pd.Index([])
             so = sparse.csr_matrix((N, 0), dtype=np.float32)
 
-        # 4. Assemblage du Container attendu par gps.py
+        # 4. Matrice de contingence creuse (Produits x Réactions) en float64
+        contingency = (sf.astype(np.float64).T @ so.astype(np.float64)).tocoo()
+        contingency.eliminate_zeros()
+
+        # 5. Assemblage du Container (compatible gps + bcpnn/ror/prr)
         container = cls(params=False)
         container.type = "individual"
         container.product_features = sf
         container.event_outcomes = so
-        container.product_names = product_names.to_numpy()
-        container.ae_names = ae_names.to_numpy()
+        container.contingency = contingency
+
+        prod_arr = product_names.to_numpy()
+        ae_arr = ae_names.to_numpy()
+        container.product_names = prod_arr
+        container.ae_names = ae_arr
+        container.product_index = prod_arr
+        container.ae_index = ae_arr
         container.N = N
         return container
 
@@ -121,3 +131,4 @@ class Container:
         with pd.ExcelWriter(name) as writer:
             self.signals.to_excel(writer, sheet_name="Signals", index=index)
             self.all_signals.to_excel(writer, sheet_name="all_data", index=index)
+
